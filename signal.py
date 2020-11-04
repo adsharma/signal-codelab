@@ -35,12 +35,37 @@ def hkdf(inp, length):
     return hkdf.derive(inp)
 
 
+def pad(msg):
+    # pkcs7 padding
+    num = 16 - (len(msg) % 16)
+    return msg + bytes([num] * num)
+
+
+def unpad(msg):
+    # remove pkcs7 padding
+    return msg[: -msg[-1]]
+
+
+class SymmRatchet(object):
+    def __init__(self, key):
+        self.state = key
+
+    def next(self, inp=b""):
+        # turn the ratchet, changing the state and yielding a new key and IV
+        output = hkdf(self.state + inp, 80)
+        self.state = output[:32]
+        outkey, iv = output[32:64], output[64:]
+        return outkey, iv
+
+
 class Bob:
     def __init__(self):
         # generate Bob's keys
         self.IKb = X25519PrivateKey.generate()
         self.SPKb = X25519PrivateKey.generate()
         self.OPKb = X25519PrivateKey.generate()
+        # initialise Bob's DH ratchet
+        self.DHratchet = X25519PrivateKey.generate()
 
     def x3dh(self, alice):
         # perform the 4 Diffie Hellman exchanges (X3DH)
@@ -52,12 +77,20 @@ class Bob:
         self.sk = hkdf(dh1 + dh2 + dh3 + dh4, 32)
         print("[Bob]\tShared key:", b64(self.sk))
 
+    def init_ratchets(self):
+        # initialise the root chain with the shared key
+        self.root_ratchet = SymmRatchet(self.sk)
+        # initialise the sending and recving chains
+        self.recv_ratchet = SymmRatchet(self.root_ratchet.next()[0])
+        self.send_ratchet = SymmRatchet(self.root_ratchet.next()[0])
+
 
 class Alice:
     def __init__(self):
         # generate Alice's keys
         self.IKa = X25519PrivateKey.generate()
         self.EKa = X25519PrivateKey.generate()
+        self.DHratchet = None
 
     def x3dh(self, bob):
         # perform the 4 Diffie Hellman exchanges (X3DH)
@@ -69,6 +102,13 @@ class Alice:
         self.sk = hkdf(dh1 + dh2 + dh3 + dh4, 32)
         print("[Alice]\tShared key:", b64(self.sk))
 
+    def init_ratchets(self):
+        # initialise the root chain with the shared key
+        self.root_ratchet = SymmRatchet(self.sk)
+        # initialise the sending and recving chains
+        self.send_ratchet = SymmRatchet(self.root_ratchet.next()[0])
+        self.recv_ratchet = SymmRatchet(self.root_ratchet.next()[0])
+
 
 alice = Alice()
 bob = Bob()
@@ -78,3 +118,13 @@ alice.x3dh(bob)
 
 # Bob comes online and performs an X3DH using Alice's public keys
 bob.x3dh(alice)
+
+# Initialize their symmetric ratchets
+alice.init_ratchets()
+bob.init_ratchets()
+
+# Print out the matching pairs
+print("[Alice]\tsend ratchet:", list(map(b64, alice.send_ratchet.next())))
+print("[Bob]\trecv ratchet:", list(map(b64, bob.recv_ratchet.next())))
+print("[Alice]\trecv ratchet:", list(map(b64, alice.recv_ratchet.next())))
+print("[Bob]\tsend ratchet:", list(map(b64, bob.send_ratchet.next())))

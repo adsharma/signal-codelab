@@ -84,6 +84,37 @@ class Bob:
         self.recv_ratchet = SymmRatchet(self.root_ratchet.next()[0])
         self.send_ratchet = SymmRatchet(self.root_ratchet.next()[0])
 
+    def dh_ratchet(self, alice_public):
+        # perform a DH ratchet rotation using Alice's public key
+        dh_recv = self.DHratchet.exchange(alice_public)
+        shared_recv = self.root_ratchet.next(dh_recv)[0]
+        # use Alice's public and our old private key
+        # to get a new recv ratchet
+        self.recv_ratchet = SymmRatchet(shared_recv)
+        print("[Bob]\tRecv ratchet seed:", b64(shared_recv))
+        # generate a new key pair and send ratchet
+        # our new public key will be sent with the next message to Alice
+        self.DHratchet = X25519PrivateKey.generate()
+        dh_send = self.DHratchet.exchange(alice_public)
+        shared_send = self.root_ratchet.next(dh_send)[0]
+        self.send_ratchet = SymmRatchet(shared_send)
+        print("[Bob]\tSend ratchet seed:", b64(shared_send))
+
+    def send(self, alice, msg):
+        key, iv = self.send_ratchet.next()
+        cipher = AES.new(key, AES.MODE_CBC, iv).encrypt(pad(msg))
+        print("[Bob]\tSending ciphertext to Alice:", b64(cipher))
+        # send ciphertext and current DH public key
+        alice.recv(cipher, self.DHratchet.public_key())
+
+    def recv(self, cipher, alice_public_key):
+        # receive Alice's new public key and use it to perform a DH
+        self.dh_ratchet(alice_public_key)
+        key, iv = self.recv_ratchet.next()
+        # decrypt the message using the new recv ratchet
+        msg = unpad(AES.new(key, AES.MODE_CBC, iv).decrypt(cipher))
+        print("[Bob]\tDecrypted message:", msg)
+
 
 class Alice:
     def __init__(self):
@@ -109,6 +140,39 @@ class Alice:
         self.send_ratchet = SymmRatchet(self.root_ratchet.next()[0])
         self.recv_ratchet = SymmRatchet(self.root_ratchet.next()[0])
 
+    def dh_ratchet(self, bob_public):
+        # perform a DH ratchet rotation using Bob's public key
+        if self.DHratchet is not None:
+            # the first time we don't have a DH ratchet yet
+            dh_recv = self.DHratchet.exchange(bob_public)
+            shared_recv = self.root_ratchet.next(dh_recv)[0]
+            # use Bob's public and our old private key
+            # to get a new recv ratchet
+            self.recv_ratchet = SymmRatchet(shared_recv)
+            print("[Alice]\tRecv ratchet seed:", b64(shared_recv))
+        # generate a new key pair and send ratchet
+        # our new public key will be sent with the next message to Bob
+        self.DHratchet = X25519PrivateKey.generate()
+        dh_send = self.DHratchet.exchange(bob_public)
+        shared_send = self.root_ratchet.next(dh_send)[0]
+        self.send_ratchet = SymmRatchet(shared_send)
+        print("[Alice]\tSend ratchet seed:", b64(shared_send))
+
+    def send(self, bob, msg):
+        key, iv = self.send_ratchet.next()
+        cipher = AES.new(key, AES.MODE_CBC, iv).encrypt(pad(msg))
+        print("[Alice]\tSending ciphertext to Bob:", b64(cipher))
+        # send ciphertext and current DH public key
+        bob.recv(cipher, self.DHratchet.public_key())
+
+    def recv(self, cipher, bob_public_key):
+        # receive Bob's new public key and use it to perform a DH
+        self.dh_ratchet(bob_public_key)
+        key, iv = self.recv_ratchet.next()
+        # decrypt the message using the new recv ratchet
+        msg = unpad(AES.new(key, AES.MODE_CBC, iv).decrypt(cipher))
+        print("[Alice]\tDecrypted message:", msg)
+
 
 alice = Alice()
 bob = Bob()
@@ -128,3 +192,12 @@ print("[Alice]\tsend ratchet:", list(map(b64, alice.send_ratchet.next())))
 print("[Bob]\trecv ratchet:", list(map(b64, bob.recv_ratchet.next())))
 print("[Alice]\trecv ratchet:", list(map(b64, alice.recv_ratchet.next())))
 print("[Bob]\tsend ratchet:", list(map(b64, bob.send_ratchet.next())))
+
+# Initialise Alice's sending ratchet with Bob's public key
+alice.dh_ratchet(bob.DHratchet.public_key())
+
+# Alice sends Bob a message and her new DH ratchet public key
+alice.send(bob, b"Hello Bob!")
+
+# Bob uses that information to sync with Alice and send her a message
+bob.send(alice, b"Hello to you too, Alice!")
